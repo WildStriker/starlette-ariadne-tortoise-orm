@@ -12,6 +12,8 @@ ariadne = "*"
 starlette = "*"
 tortoise-orm = "*"
 uvicorn = "*"
+bcrypt = "*"
+pyjwt = "*"
 
 [requires]
 python_version = "3.7"

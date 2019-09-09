@@ -1,6 +1,7 @@
 type User {
     id: ID!
-    name: String!
+    username: String!
+    email: String!
     posts: [Post]!
 }
 
@@ -16,16 +17,37 @@ type Query {
     posts: [Post]!
 }
 
+enum Status {
+    SUCCESSFUL
+    FAILED
+    AUTHERROR
+}
+
+type CreateUserPayload {
+    status: Status!
+    error: String
+    user: User
+}
+
 type CreatePostPayload {
-        status: Boolean!
+        status: Status!
         error: String
         post: Post
 }
 
+type LoginPayload {
+    status: Status!
+    error: String
+    token: String
+}
+
 type Mutation {
-    createUser(name: String!): User!
-    createPost(userId: ID!, title: String!, body: String!): CreatePostPayload
+    createUser(username: String!, email: String!, password: String!): CreateUserPayload
+    createPost(title: String!, body: String!): CreatePostPayload
     sendMessage(message: String!): Boolean!
+
+    login(username: String!, password: String!): LoginPayload
+    logout: Boolean!
 }
 
 type Subscription {

@@ -1,7 +1,12 @@
 """app and graphql resolver set up in this module"""
 import asyncio
+import base64
+import hashlib
 import os
+import uuid
 
+import bcrypt
+import jwt
 from ariadne import (ObjectType, SubscriptionType,
                      convert_kwargs_to_snake_case, load_schema_from_path)
 from ariadne.asgi import GraphQL
@@ -9,9 +14,12 @@ from ariadne.contrib.tracing.apollotracing import ApolloTracingExtension
 from ariadne.executable_schema import make_executable_schema
 from graphql.pyutils import EventEmitter, EventEmitterAsyncIterator
 from starlette.applications import Starlette
+from starlette.middleware.authentication import AuthenticationMiddleware
 from tortoise.exceptions import DoesNotExist
 
+from .auth import JWTAuthBackend, JWTUser, on_auth_error
 from .models import Post, User, close_connections, init_db
+from .settings import DEBUG, JWT_SECRET_KEY
 
 APP = Starlette()
 
@@ -46,48 +54,114 @@ async def get_post_user(post: Post, _info) -> User:
         User -- related User Object
     """
     if not post.user:
-        await post.fetch_related('user')
+        await post.fetch_related("user")
     return post.user
 
 
 @MUTATION.field("createUser")
-async def create_user(_root, _info, name: str) -> User:
+async def create_user(_root, _info, username: str, email: str, password: str) -> dict:
     """create a new user
 
     Arguments:
-        name {str} -- user's name
+        username {str} -- login username
+        email {str} -- user email address
+        password {str} -- password in plain text (will be hashed)
 
     Returns:
-        User -- created User Object
+        dict -- see CreateUserPayload
     """
-    user = await User.create(name=name)
-    return user
+    try:
+        user = await User.get(username=username)
+        return {"status": "FAILED", "error": "User name is already in use"}
+    except DoesNotExist:
+        pass
+
+    hashed = bcrypt.hashpw(
+        base64.b64encode(hashlib.sha256(password.encode()).digest()),
+        bcrypt.gensalt()).decode()
+
+    token_id = uuid.uuid4()
+
+    user = await User.create(username=username, email=email, password=hashed, token_id=token_id)
+    return {"status": "SUCCESSFUL", "user": user}
 
 
 @MUTATION.field("createPost")
 @convert_kwargs_to_snake_case
-async def create_post(_root, _info, user_id: int, title: str, body: str) -> Post:
+async def create_post(_root, info, title: str, body: str) -> dict:
     """create a new post for user
 
     emits event when new post is created
 
     Arguments:
-        user_id {int} -- user id for post
         title {str} -- post's title
         body {str} -- post's body
 
     Returns:
-        Post -- create Post Object
+        dict -- see CreatePostPayload
     """
+
+    if not isinstance(info.context["request"].user, JWTUser):
+        return {"status": "AUTHERROR", "error": "Please log in"}
+
     try:
-        user = await User.get(id=user_id)
+        user = await User.get(id=info.context["request"].user.user_id)
     except DoesNotExist:
-        return {'status': False, 'error': 'unable to create post, user does not exist'}
+        return {"status": "FAILED", "error": "unable to create post, user does not exist"}
 
     post = await Post.create(user=user, title=title, body=body)
     PUBSUB.emit("new_post", post)
 
-    return {'status': True, 'post': post}
+    return {"status": "SUCCESSFUL", "post": post}
+
+
+@MUTATION.field("login")
+async def log_in(_root, _info, username: str, password: str) -> dict:
+    """returns token for successful log in
+
+    Arguments:
+        username {str} -- user name
+        password {str} -- password plain text
+
+    Returns:
+        dict -- see LoginPayload
+    """
+    try:
+        user = await User.get(username=username)
+    except DoesNotExist:
+        return {"status": "FAILED", "error": "unable to log in"}
+
+    if bcrypt.checkpw(
+            base64.b64encode(hashlib.sha256(password.encode()).digest()),
+            user.password.encode()):
+
+        # encoded web token (not encrypted, do not put sensitive data here)
+        encoded_jwt = jwt.encode(
+            {
+                "id": user.id,
+                "token_id": user.token_id.hex
+            },
+            str(JWT_SECRET_KEY),
+            algorithm="HS256")
+        return {"status": "SUCCESSFUL", "token": encoded_jwt.decode()}
+    else:
+        return {"status": "FAILED", "error": "unable to log in"}
+
+
+@MUTATION.field("logout")
+async def log_out(_root, info) -> bool:
+    """Forces a user to log in again on ALL devices by generating new token id
+
+    to "logout" user on the a single device, just clear jwt on that device
+    """
+
+    # user if not logged in
+    if not isinstance(info.context["request"].user, JWTUser):
+        return False
+
+    token_id = uuid.uuid4()
+    await User.get(id=info.context["request"].user.user_id).update(token_id=token_id)
+    return True
 
 
 @SUBSCRIPTION.source("newPost")
@@ -135,11 +209,14 @@ SCHEMA = make_executable_schema(SCHEMA, [MUTATION, QUERY, SUBSCRIPTION, POST])
 
 GRAPHQL_SERVER = GraphQL(
     SCHEMA,
-    debug=True,
+    debug=DEBUG,
     extensions=[ApolloTracingExtension],
 )
 
-
+APP.add_middleware(
+    AuthenticationMiddleware,
+    backend=JWTAuthBackend(),
+    on_error=on_auth_error)
 APP.add_route("/graphql/", GRAPHQL_SERVER)
 APP.add_websocket_route("/graphql/", GRAPHQL_SERVER)
-APP.debug = True
+APP.debug = DEBUG

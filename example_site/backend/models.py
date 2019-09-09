@@ -2,11 +2,13 @@
 from tortoise import Tortoise, fields
 from tortoise.models import Model
 
+from .settings import DATABASE_URL
+
 
 async def init_db():
     """initialize the db"""
     await Tortoise.init(
-        db_url='sqlite://db.sqlite3',
+        db_url=DATABASE_URL,
         modules={'models': ['backend.models']}
     )
     # Generate the schema
@@ -24,12 +26,18 @@ class User(Model):
     id field is auto incremented
 
     Arguments:
-        name {fields.CharField} -- name of user
+        token_id {str} -- used to "version" token to make it invalid (i.e. password changes)
+        username {str} -- name of user
+        email {str} -- email address
+        password {str} -- password hash
     """
     # Defining `id` field is optional, it will be defined automatically
     # if you haven't done it yourself
     id = fields.IntField(pk=True)
-    name = fields.CharField(max_length=255)
+    token_id = fields.UUIDField()
+    username = fields.CharField(max_length=50, unique=True)
+    email = fields.CharField(max_length=255)
+    password = fields.CharField(max_length=255)
 
 
 class Post(Model):
