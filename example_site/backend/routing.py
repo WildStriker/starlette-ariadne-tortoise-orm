@@ -115,7 +115,7 @@ async def counter(_root, _info, limit: int):
 
 
 @SUBSCRIPTION.field("count")
-def count(number, _info, _limit):
+def count(number, _info, **_kwargs):
     """returns current count number, starting at 1"""
     return number + 1
 
